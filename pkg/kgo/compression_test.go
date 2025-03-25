@@ -129,8 +129,8 @@ func TestCompressDecompress(t *testing.T) {
 
 func BenchmarkCompress(b *testing.B) {
 	in := bytes.Repeat([]byte("abcdefghijklmno pqrs tuvwxy   z"), 100)
-	for _, codec := range []codecType{codecGzip, codecSnappy, codecLZ4, codecZstd} {
-		c, _ := newCompressor(CompressionCodec{codec: codec})
+	for _, codec := range []codecType{codecGzip, codecSnappy, codecLZ4, codecZstd, codecMinLZ} {
+		c, _ := newCompressor(CompressionCodec{codec: codecMinLZ})
 		b.Run(fmt.Sprint(codec), func(b *testing.B) {
 			var afterSize int
 			for i := 0; i < b.N; i++ {
@@ -147,7 +147,7 @@ func BenchmarkCompress(b *testing.B) {
 
 func BenchmarkDecompress(b *testing.B) {
 	in := bytes.Repeat([]byte("abcdefghijklmno pqrs tuvwxy   z"), 100)
-	for _, codec := range []codecType{codecGzip, codecSnappy, codecLZ4, codecZstd} {
+	for _, codec := range []codecType{codecGzip, codecSnappy, codecLZ4, codecZstd, codecMinLZ} {
 		c, _ := newCompressor(CompressionCodec{codec: codec})
 		w := byteBuffers.Get().(*bytes.Buffer)
 		w.Reset()

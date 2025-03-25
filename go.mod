@@ -9,4 +9,6 @@ require (
 	golang.org/x/crypto v0.32.0
 )
 
+require github.com/minio/minlz v1.0.0
+
 retract v1.11.4 // This version is actually a breaking change and requires a major version change.

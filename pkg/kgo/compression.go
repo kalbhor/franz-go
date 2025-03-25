@@ -11,6 +11,7 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/zstd"
+	"github.com/minio/minlz"
 	"github.com/pierrec/lz4/v4"
 )
 
@@ -24,6 +25,7 @@ const (
 	codecSnappy
 	codecLZ4
 	codecZstd
+	codecMinLZ
 )
 
 // CompressionCodec configures how records are compressed before being sent.
@@ -52,6 +54,11 @@ func Lz4Compression() CompressionCodec { return CompressionCodec{codecLZ4, 0} }
 // ZstdCompression enables zstd compression with the default compression level.
 func ZstdCompression() CompressionCodec { return CompressionCodec{codecZstd, 0} }
 
+// MinLZCompression enables minLZ compression with the balanced compression level.
+func MinLZCompression() CompressionCodec {
+	return CompressionCodec{codecMinLZ, int(minlz.LevelBalanced)}
+}
+
 // WithLevel changes the compression codec's "level", effectively allowing for
 // higher or lower compression ratios at the expense of CPU speed.
 //
@@ -65,10 +72,11 @@ func (c CompressionCodec) WithLevel(level int) CompressionCodec {
 }
 
 type compressor struct {
-	options  []codecType
-	gzPool   sync.Pool
-	lz4Pool  sync.Pool
-	zstdPool sync.Pool
+	options   []codecType
+	gzPool    sync.Pool
+	lz4Pool   sync.Pool
+	zstdPool  sync.Pool
+	minLZPool sync.Pool
 }
 
 func newCompressor(codecs ...CompressionCodec) (*compressor, error) {
@@ -89,7 +97,7 @@ func newCompressor(codecs ...CompressionCodec) (*compressor, error) {
 	codecs = codecs[:keepIdx]
 
 	for _, codec := range codecs {
-		if codec.codec < 0 || codec.codec > 4 {
+		if codec.codec < 0 || codec.codec > 5 {
 			return nil, errors.New("unknown compression codec")
 		}
 	}
@@ -145,6 +153,13 @@ out:
 				opts = append(opts, zstd.WithEncoderLevel(zstd.EncoderLevel(codec.level)))
 			}
 			c.zstdPool = sync.Pool{New: fn}
+		case codecMinLZ:
+			level := codec.level
+			if level < 0 {
+				level = 0 // 0 == minlz.Fast
+			}
+			fn := func() any { return minlz.NewWriter(new(bytes.Buffer), minlz.WriterLevel(level)) }
+			c.minLZPool = sync.Pool{New: fn}
 		}
 	}
 
@@ -200,6 +215,17 @@ func (c *compressor) compress(dst *bytes.Buffer, src []byte, produceRequestVersi
 			return nil, -1
 		}
 		out = dst.Bytes()
+	case codecMinLZ:
+		mlz := c.minLZPool.Get().(*minlz.Writer)
+		defer c.minLZPool.Put(mlz)
+		mlz.Reset(dst)
+		if _, err := mlz.Write(src); err != nil {
+			return nil, -1
+		}
+		if err := mlz.Close(); err != nil {
+			return nil, -1
+		}
+		out = dst.Bytes()
 	case codecSnappy:
 		// Because the Snappy and Zstd codecs do not accept an io.Writer interface
 		// and directly take a []byte slice, here, the underlying []byte slice (`dst`)
@@ -230,9 +256,10 @@ func (c *compressor) compress(dst *bytes.Buffer, src []byte, produceRequestVersi
 }
 
 type decompressor struct {
-	ungzPool   sync.Pool
-	unlz4Pool  sync.Pool
-	unzstdPool sync.Pool
+	ungzPool    sync.Pool
+	unlz4Pool   sync.Pool
+	unzstdPool  sync.Pool
+	unminLZPool sync.Pool
 }
 
 func newDecompressor() *decompressor {
@@ -242,6 +269,9 @@ func newDecompressor() *decompressor {
 		},
 		unlz4Pool: sync.Pool{
 			New: func() any { return lz4.NewReader(nil) },
+		},
+		unminLZPool: sync.Pool{
+			New: func() any { return minlz.NewReader(nil) },
 		},
 		unzstdPool: sync.Pool{
 			New: func() any {
@@ -299,6 +329,14 @@ func (d *decompressor) decompress(src []byte, codec byte) ([]byte, error) {
 		defer d.unlz4Pool.Put(unlz4)
 		unlz4.Reset(bytes.NewReader(src))
 		if _, err := io.Copy(out, unlz4); err != nil {
+			return nil, err
+		}
+		return append([]byte(nil), out.Bytes()...), nil
+	case codecMinLZ:
+		unminLZ := d.unminLZPool.Get().(*minlz.Reader)
+		defer d.unminLZPool.Put(unminLZ)
+		unminLZ.Reset(bytes.NewReader(src))
+		if _, err := io.Copy(out, unminLZ); err != nil {
 			return nil, err
 		}
 		return append([]byte(nil), out.Bytes()...), nil
